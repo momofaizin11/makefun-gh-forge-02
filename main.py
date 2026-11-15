@@ -113,10 +113,20 @@ def next_seq() -> int:
         return _clock[0]
 
 
+_ISO_CACHE = {}
+
+
 def stamp() -> tuple[int, str]:
     n = next_seq()
     ts = BASE_TS + n
-    return ts, time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+    iso = _ISO_CACHE.get(ts)
+    if iso is None:
+        iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+        # Deterministic counter stamps: one strftime per distinct second value,
+        # not per issue/branch mutation.
+        if len(_ISO_CACHE) < 4096:
+            _ISO_CACHE[ts] = iso
+    return ts, iso
 
 
 def sha1_hex(data: bytes) -> str:
