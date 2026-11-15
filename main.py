@@ -2462,8 +2462,9 @@ class ResponseCache:
         self.lock = threading.Lock()
 
     def get(self, key):
-        with self.lock:
-            return self.entries.get(key)
+        # Reads are lock-free: dict.get is atomic under the GIL and only
+        # eviction/mutation takes the lock.
+        return self.entries.get(key)
 
     def put(self, key, blob: bytes) -> None:
         with self.lock:
@@ -2512,8 +2513,8 @@ class GitResponseCache:
         self.lock = threading.Lock()
 
     def get(self, key):
-        with self.lock:
-            return self.entries.get(key)
+        # Lock-free read: dict.get is atomic under the GIL.
+        return self.entries.get(key)
 
     def put(self, key, blob: bytes) -> None:
         with self.lock:
@@ -3105,9 +3106,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True}, {"Allow": "GET, POST, PATCH, PUT, DELETE"})
 
     def _replay(self, blob: bytes) -> None:
+        # One buffered write; the handler loop flushes it once per request.
         try:
             self.wfile.write(blob)
-            self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
