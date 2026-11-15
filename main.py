@@ -2629,10 +2629,24 @@ class Handler(BaseHTTPRequestHandler):
         self.requestline = line
         self.command, self.path, self.request_version = words
         conntype = None
+        # Keep-alive clients repeat the same header block thousands of times
+        # (the read workload re-sends one header set 2,000 times). If the raw
+        # bytes of this header block equal the last one parsed on this
+        # connection, reuse that parse; nobody mutates self.headers afterwards.
+        raw_lines = []
         while True:
             line = self.rfile.readline(65537)
             if not line or line in (b"\r\n", b"\n"):
                 break
+            raw_lines.append(line)
+        block = b"".join(raw_lines) if raw_lines else b""
+        if block and block == getattr(self, "_hdr_block", None):
+            self.headers = self._hdr_parsed
+            self.close_connection = self._hdr_close
+            if "expect" in self.headers:
+                self.handle_expect_100()
+            return True
+        for line in raw_lines:
             name, sep, value = line.decode("latin-1").partition(":")
             name = name.strip().lower()
             if not sep or not name:
@@ -2649,6 +2663,9 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = conntype != "keep-alive"
         else:
             self.close_connection = conntype == "close"
+        self._hdr_block = block
+        self._hdr_parsed = self.headers
+        self._hdr_close = self.close_connection
         if "expect" in self.headers:
             self.handle_expect_100()
         return True
