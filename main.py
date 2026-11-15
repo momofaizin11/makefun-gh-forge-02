@@ -2686,26 +2686,50 @@ class Handler(BaseHTTPRequestHandler):
     def _request_id(self) -> str:
         return "%016x" % (next_seq() * 2654435761 & 0xFFFFFFFFFFFFFFFF)
 
+    # Status line words the suite can see. Everything else falls back to the
+    # stdlib table. Built into the head bytes directly: formatting five
+    # send_header strings per response across thousands of responses is real
+    # per-request work.
+    _STATUS_WORDS = {200: "OK", 201: "Created", 202: "Accepted", 204: "No Content",
+                     301: "Moved Permanently", 302: "Found", 304: "Not Modified",
+                     400: "Bad Request", 401: "Unauthorized", 403: "Forbidden",
+                     404: "Not Found", 405: "Method Not Allowed", 409: "Conflict",
+                     415: "Unsupported Media Type", 422: "Unprocessable Entity",
+                     500: "Internal Server Error", 501: "Not Implemented"}
+
+    def _head_bytes(self, status: int, ctype: str, body_len: int, extra) -> bytes:
+        rid = self._request_id()
+        status_word = self._STATUS_WORDS.get(status) or \
+            (BaseHTTPRequestHandler.responses.get(status, ("", ""))[1] or "OK")
+        out = ["HTTP/1.1 %d %s\r\n" % (status, status_word),
+               "Content-Type: ", ctype, "\r\nContent-Length: %d\r\n" % body_len,
+               "X-GitHub-Request-Id: ", rid, "\r\n",
+               "X-OAuth-Scopes: repo, read:org\r\nX-Accepted-OAuth-Scopes: repo\r\n"]
+        for key, value in extra:
+            out.append(key)
+            out.append(": ")
+            out.append(value)
+            out.append("\r\n")
+        out.append("\r\n")
+        return "".join(out).encode("latin-1")
+
     def send_json(self, status: int, payload, extra: dict | None = None, raw: bytes | None = None):
         if payload is None and raw is None:
             raw = b""
         if raw is None:
             raw = json.dumps(payload).encode("utf-8")
-        body = raw
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-GitHub-Request-Id", self._request_id())
-        self.send_header("X-OAuth-Scopes", "repo, read:org")
-        self.send_header("X-Accepted-OAuth-Scopes", "repo")
-        for key, value in (extra or {}).items():
-            self.send_header(key, value)
-        self.end_headers()
-        if self.command != "HEAD":
-            try:
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+        head = self._head_bytes(status, "application/json; charset=utf-8", len(raw),
+                                () if not extra else extra.items())
+        if self.command == "HEAD":
+            self._emit(head)
+        else:
+            self._emit(head + raw)
+
+    def _emit(self, blob: bytes) -> None:
+        try:
+            self.wfile.write(blob)
+        except (BrokenPipeError, ConnectionResetError):
+            self.close_connection = True
 
     def send_error_json(self, status: int, message: str, extra: dict | None = None):
         self._drain()
@@ -2783,17 +2807,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- git smart HTTP --------------------------------------------------
     def send_git(self, status: int, ctype: str, body: bytes):
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-cache, max-age=0, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("X-GitHub-Request-Id", self._request_id())
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        head = self._head_bytes(status, ctype, len(body),
+                                (("Cache-Control", "no-cache, max-age=0, must-revalidate"),
+                                 ("Pragma", "no-cache")))
+        if self.command == "HEAD":
+            self._emit(head)
+        else:
+            self._emit(head + body)
 
     def handle_git(self, method: str, path: str, query: dict) -> bool:
         """Serve /{owner}/{repo}.git/...; True when the path was ours."""
@@ -3692,15 +3712,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_mcp(self, payload, status: int = 200):
         body = json.dumps(payload).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("X-GitHub-Request-Id", self._request_id())
-        self.end_headers()
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        self._emit(self._head_bytes(status, "application/json; charset=utf-8",
+                                    len(body), ()) + body)
 
     def mcp_one(self, message):
         if not isinstance(message, dict):
